@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Handwriting Recognizer · Digit / Letter / Sentence</title>
+  <meta name="description" content="Draw digits, letters, or full words and let the CNN predict them in real time." />
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f0f13;
+      --surface:  #1a1a24;
+      --surface2: #22222f;
+      --border:   #2e2e42;
+      --accent:   #7c6ff7;
+      --accent2:  #a78bfa;
+      --success:  #34d399;
+      --warn:     #f59e0b;
+      --text:     #e2e2f0;
+      --muted:    #7b7b99;
+      --radius:   14px;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+      background:
+        radial-gradient(ellipse at 20% 20%, rgba(124,111,247,.15) 0%, transparent 60%),
+        radial-gradient(ellipse at 80% 80%, rgba(167,139,250,.10) 0%, transparent 60%),
+        var(--bg);
+    }
+
+    /* ── Card ─────────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 36px 40px 40px;
+      width: 100%;
+      max-width: 620px;
+      box-shadow: 0 32px 80px rgba(0,0,0,.5), 0 0 0 1px rgba(124,111,247,.08);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      transition: max-width .35s cubic-bezier(.4,0,.2,1);
+    }
+
+    /* ── Header ───────────────────────────────────────────────────────────── */
+    .header { text-align: center; }
+    .badge {
+      display: inline-block;
+      background: rgba(124,111,247,.15);
+      color: var(--accent2);
+      border: 1px solid rgba(124,111,247,.3);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 4px 12px;
+      border-radius: 99px;
+      margin-bottom: 12px;
+    }
+    .header h1 {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -.02em;
+      background: linear-gradient(135deg, #fff 30%, var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.2;
+    }
+    .header p {
+      margin-top: 8px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+      min-height: 2em;
+      transition: opacity .2s;
+    }
+
+    /* ── Mode tabs ────────────────────────────────────────────────────────── */
+    .mode-tabs {
+      display: flex;
+      gap: 8px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 5px;
+      width: 100%;
+    }
+
+    .mode-tab {
+      flex: 1;
+      padding: 9px 0;
+      border: none;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      background: transparent;
+      color: var(--muted);
+      transition: background .18s, color .18s, box-shadow .18s, transform .1s;
+      letter-spacing: .01em;
+    }
+    .mode-tab:active { transform: scale(.96); }
+    .mode-tab.active {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+      box-shadow: 0 4px 16px rgba(124,111,247,.35);
+    }
+    .mode-tab:not(.active):hover { color: var(--text); background: rgba(255,255,255,.05); }
+
+    /* ── Canvas wrapper ───────────────────────────────────────────────────── */
+    .canvas-wrapper {
+      position: relative;
+      border-radius: var(--radius);
+      padding: 4px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      box-shadow: 0 0 40px rgba(124,111,247,.25);
+      transition: box-shadow .3s;
+    }
+    .canvas-wrapper::after {
+      content: attr(data-hint);
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 500;
+      color: rgba(255,255,255,.18);
+      pointer-events: none;
+      border-radius: calc(var(--radius) - 2px);
+      transition: opacity .2s;
+    }
+    .canvas-wrapper.has-drawing::after { opacity: 0; }
+
+    canvas {
+      display: block;
+      border-radius: calc(var(--radius) - 2px);
+      cursor: crosshair;
+      touch-action: none;
+      max-width: 100%;
+      transition: width .35s cubic-bezier(.4,0,.2,1), height .35s cubic-bezier(.4,0,.2,1);
+    }
+
+    /* ── Action buttons ───────────────────────────────────────────────────── */
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      width: 100%;
+    }
+
+    button { cursor: pointer; }
+
+    #predictBtn {
+      flex: 1;
+      padding: 13px 0;
+      border: none;
+      border-radius: 10px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+      box-shadow: 0 4px 20px rgba(124,111,247,.4);
+      transition: transform .12s, box-shadow .12s, opacity .12s;
+    }
+    #predictBtn:hover { box-shadow: 0 6px 28px rgba(124,111,247,.6); }
+    #predictBtn:active { transform: scale(.97); }
+    #predictBtn:disabled { opacity: .5; cursor: not-allowed; }
+
+    #eraserBtn, #clearBtn {
+      flex: 0 0 auto;
+      padding: 13px 22px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      background: var(--surface2);
+      color: var(--muted);
+      transition: transform .12s, color .12s, border-color .12s, background .12s;
+    }
+    #eraserBtn:hover, #clearBtn:hover { border-color: var(--muted); color: var(--text); }
+    #eraserBtn:active, #clearBtn:active { transform: scale(.96); }
+
+    #eraserBtn.active {
+      background: var(--border);
+      color: var(--text);
+      border-color: var(--muted);
+    }
+
+
+    /* ── Result panel ─────────────────────────────────────────────────────── */
+    .result {
+      width: 100%;
+      min-height: 92px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 24px;
+      transition: border-color .3s;
+    }
+    .result.has-result { border-color: rgba(124,111,247,.4); }
+
+    .result-placeholder {
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    /* single character result (digit / letter) */
+    .result-single { display: none; text-align: center; }
+    .result-single .label-small {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .result-single .big-value {
+      font-size: 60px;
+      font-weight: 800;
+      line-height: 1;
+      background: linear-gradient(135deg, #fff 20%, var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -.04em;
+    }
+    .result-single .conf-text {
+      margin-top: 6px;
+      font-size: 13px;
+      color: var(--success);
+      font-weight: 600;
+    }
+    .conf-bar-track {
+      margin-top: 10px;
+      width: 160px;
+      height: 4px;
+      background: var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .conf-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--success));
+      border-radius: 99px;
+      transition: width .5s cubic-bezier(.4,0,.2,1);
+      width: 0%;
+    }
+
+    /* sentence result */
+    .result-sentence { display: none; text-align: center; }
+    .result-sentence .label-small {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .sentence-value {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: .06em;
+      word-break: break-all;
+      background: linear-gradient(135deg, #fff 20%, var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.3;
+    }
+    .char-count {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* spinner */
+    .spinner {
+      display: none;
+      width: 28px; height: 28px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent2);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Footer ───────────────────────────────────────────────────────────── */
+    .footer {
+      font-size: 11px;
+      color: var(--muted);
+      opacity: .6;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+<div class="card" id="card">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="badge">CNN · MNIST + EMNIST</div>
+    <h1>Handwriting Recognizer</h1>
+    <p id="headerHint">Draw any digit (0–9) on the canvas and hit <strong>Predict</strong>.</p>
+  </div>
+
+  <!-- Mode tabs -->
+  <div class="mode-tabs" role="tablist" aria-label="Prediction mode">
+    <button class="mode-tab active" id="tabDigit"    role="tab" aria-selected="true">🔢 Digit</button>
+    <button class="mode-tab"        id="tabLetter"   role="tab" aria-selected="false">🔤 Letter</button>
+    <button class="mode-tab"        id="tabSentence" role="tab" aria-selected="false">📝 Sentence</button>
+  </div>
+
+  <!-- Canvas -->
+  <div class="canvas-wrapper" id="canvasWrapper" data-hint="Draw here">
+    <canvas id="drawCanvas" width="280" height="280"></canvas>
+  </div>
+
+  <!-- Action buttons -->
+  <div class="btn-row">
+    <button id="predictBtn">⚡ Predict</button>
+    <button id="eraserBtn">🧽 Eraser</button>
+    <button id="clearBtn">✕ Clear</button>
+  </div>
+
+  <!-- Result -->
+  <div class="result" id="resultBox">
+    <div class="result-placeholder" id="resultPlaceholder">
+      Your prediction will appear here
+    </div>
+
+    <!-- Digit / Letter view -->
+    <div class="result-single" id="resultSingle">
+      <div class="label-small" id="resultLabel">Predicted Digit</div>
+      <div class="big-value"   id="bigValue">—</div>
+      <div class="conf-text"   id="confText"></div>
+      <div class="conf-bar-track">
+        <div class="conf-bar-fill" id="confBar"></div>
+      </div>
+    </div>
+
+    <!-- Sentence view -->
+    <div class="result-sentence" id="resultSentence">
+      <div class="label-small">Predicted Text</div>
+      <div class="sentence-value" id="sentenceValue"></div>
+      <div class="char-count"    id="charCount"></div>
+    </div>
+
+    <div class="spinner" id="spinner"></div>
+  </div>
+
+  <div class="footer">Handwritten Character Recognition &nbsp;·&nbsp; CNN on MNIST &amp; EMNIST</div>
+</div>
+
+<script>
+  /* ── State ─────────────────────────────────────────────────────────────── */
+  let currentMode = "digit";    // "digit" | "letter" | "sentence"
+  let isEraser = false;
+
+  const CANVAS_SIZES = {
+    digit:    { w: 280, h: 280 },
+    letter:   { w: 280, h: 280 },
+    sentence: { w: 800, h: 120 },
+  };
+
+  const HINTS = {
+    digit:    "Draw a digit",
+    letter:   "Draw a letter",
+    sentence: "Write text with clear gaps between words. Use thin strokes.",
+  };
+
+  const HEADER_HINTS = {
+    digit:    "Draw any digit (0–9) on the canvas and hit <strong>Predict</strong>.",
+    letter:   "Draw any letter (a–z) on the canvas and hit <strong>Predict</strong>.",
+    sentence: "Write a full word on the wide canvas and hit <strong>Predict</strong>.",
+  };
+
+  /* ── Canvas setup ───────────────────────────────────────────────────────── */
+  const canvas  = document.getElementById("drawCanvas");
+  const ctx     = canvas.getContext("2d");
+  const wrapper = document.getElementById("canvasWrapper");
+
+  function updateBrush() {
+    const bg = currentMode === "sentence" ? "#ffffff" : "#000000";
+    const fg = currentMode === "sentence" ? "#000000" : "#ffffff";
+    ctx.strokeStyle = isEraser ? bg : fg;
+    
+    let baseWidth = currentMode === "sentence" ? 4 : 18;
+    ctx.lineWidth = isEraser ? baseWidth * 2 : baseWidth;
+  }
+
+  function clearCanvas() {
+    ctx.fillStyle = currentMode === "sentence" ? "#ffffff" : "#000000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    updateBrush();
+  }
+
+  function initCanvas(mode) {
+    const { w, h } = CANVAS_SIZES[mode];
+    canvas.width  = w;
+    canvas.height = h;
+    ctx.lineCap     = "round";
+    ctx.lineJoin    = "round";
+    clearCanvas();
+    wrapper.setAttribute("data-hint", HINTS[mode]);
+  }
+
+  initCanvas("digit");
+
+  let drawing  = false;
+  let hasDrawn = false;
+  let lastX = 0, lastY = 0;
+
+  function getPos(e) {
+    const rect   = canvas.getBoundingClientRect();
+    const scaleX = canvas.width  / rect.width;
+    const scaleY = canvas.height / rect.height;
+    if (e.touches) {
+      return {
+        x: (e.touches[0].clientX - rect.left) * scaleX,
+        y: (e.touches[0].clientY - rect.top)  * scaleY,
+      };
+    }
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top)  * scaleY,
+    };
+  }
+
+  function startDraw(e) {
+    e.preventDefault();
+    drawing = true;
+    const pos = getPos(e);
+    lastX = pos.x; lastY = pos.y;
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
+    ctx.lineTo(lastX, lastY);
+    ctx.stroke();
+    markDrawn();
+  }
+
+  function draw(e) {
+    e.preventDefault();
+    if (!drawing) return;
+    const pos = getPos(e);
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    lastX = pos.x; lastY = pos.y;
+    markDrawn();
+  }
+
+  function stopDraw() { drawing = false; }
+
+  function markDrawn() {
+    if (!hasDrawn) {
+      hasDrawn = true;
+      wrapper.classList.add("has-drawing");
+    }
+  }
+
+  canvas.addEventListener("mousedown",  startDraw);
+  canvas.addEventListener("mousemove",  draw);
+  canvas.addEventListener("mouseup",    stopDraw);
+  canvas.addEventListener("mouseleave", stopDraw);
+  canvas.addEventListener("touchstart", startDraw, { passive: false });
+  canvas.addEventListener("touchmove",  draw,      { passive: false });
+  canvas.addEventListener("touchend",   stopDraw);
+
+  /* ── Mode switching ─────────────────────────────────────────────────────── */
+  const tabs = {
+    digit:    document.getElementById("tabDigit"),
+    letter:   document.getElementById("tabLetter"),
+    sentence: document.getElementById("tabSentence"),
+  };
+
+  function switchMode(mode) {
+    if (mode === currentMode) return;
+    currentMode = mode;
+    isEraser = false;
+    document.getElementById("eraserBtn").classList.remove("active");
+
+    // Update tab styles
+    Object.entries(tabs).forEach(([m, btn]) => {
+      btn.classList.toggle("active", m === mode);
+      btn.setAttribute("aria-selected", m === mode);
+    });
+
+    // Update header hint
+    document.getElementById("headerHint").innerHTML = HEADER_HINTS[mode];
+
+    // Resize canvas and card
+    initCanvas(mode);
+    document.querySelector('.card').style.maxWidth = mode === "sentence" ? "880px" : "620px";
+    hasDrawn = false;
+    wrapper.classList.remove("has-drawing");
+
+    resetResult();
+  }
+
+  tabs.digit   .addEventListener("click", () => switchMode("digit"));
+  tabs.letter  .addEventListener("click", () => switchMode("letter"));
+  tabs.sentence.addEventListener("click", () => switchMode("sentence"));
+
+  /* ── Tools ──────────────────────────────────────────────────────────────── */
+  document.getElementById("eraserBtn").addEventListener("click", (e) => {
+    isEraser = !isEraser;
+    e.target.classList.toggle("active", isEraser);
+    updateBrush();
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    clearCanvas();
+    hasDrawn = false;
+    wrapper.classList.remove("has-drawing");
+    resetResult();
+  });
+
+  /* ── Result helpers ─────────────────────────────────────────────────────── */
+  const resultBox         = document.getElementById("resultBox");
+  const resultPlaceholder = document.getElementById("resultPlaceholder");
+  const resultSingle      = document.getElementById("resultSingle");
+  const resultSentence    = document.getElementById("resultSentence");
+  const spinner           = document.getElementById("spinner");
+
+  function setLoading(on) {
+    spinner.style.display           = on ? "block" : "none";
+    resultPlaceholder.style.display = on ? "none"  : "";
+    if (on) {
+      resultSingle  .style.display = "none";
+      resultSentence.style.display = "none";
+    }
+  }
+
+  function showSingleResult(label, value, confidence) {
+    resultBox.classList.add("has-result");
+    resultPlaceholder.style.display = "none";
+    spinner.style.display           = "none";
+    resultSentence.style.display    = "none";
+    resultSingle.style.display      = "block";
+
+    document.getElementById("resultLabel").textContent = label;
+    document.getElementById("bigValue")   .textContent = value;
+    document.getElementById("confText")   .textContent = `Confidence: ${confidence.toFixed(1)}%`;
+    document.getElementById("confBar")    .style.width = `${confidence}%`;
+  }
+
+  function showSentenceResult(sentence, charCount) {
+    resultBox.classList.add("has-result");
+    resultPlaceholder.style.display = "none";
+    spinner.style.display           = "none";
+    resultSingle.style.display      = "none";
+    resultSentence.style.display    = "block";
+
+    document.getElementById("sentenceValue").textContent =
+      sentence || "(nothing detected)";
+    const spaces = (sentence.match(/ /g) || []).length;
+    const wordCount = spaces + (charCount > 0 ? 1 : 0);
+    let countText = charCount > 0
+      ? `${charCount} letter${charCount !== 1 ? "s" : ""}`
+      : "";
+    if (spaces > 0) countText += ` · ${wordCount} word${wordCount !== 1 ? "s" : ""} (spaces auto-detected)`;
+    document.getElementById("charCount").textContent = countText;
+  }
+
+  function resetResult() {
+    resultBox.classList.remove("has-result");
+    resultPlaceholder.style.display = "";
+    resultPlaceholder.textContent   = "Your prediction will appear here";
+    resultSingle.style.display      = "none";
+    resultSentence.style.display    = "none";
+    spinner.style.display           = "none";
+    document.getElementById("confBar").style.width = "0%";
+  }
+
+  /* ── Predict ────────────────────────────────────────────────────────────── */
+  document.getElementById("predictBtn").addEventListener("click", async () => {
+    if (!hasDrawn) {
+      resultPlaceholder.textContent = "✏️  Please draw something first!";
+      return;
+    }
+
+    setLoading(true);
+    document.getElementById("predictBtn").disabled = true;
+
+    try {
+      const imageDataURL = canvas.toDataURL("image/png");
+      const response = await fetch("/predict", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ image: imageDataURL, mode: currentMode }),
+      });
+
+      if (!response.ok) throw new Error(`Server error: ${response.status}`);
+      const data = await response.json();
+
+      if (data.mode === "digit") {
+        showSingleResult("Predicted Digit", data.digit, data.confidence);
+      } else if (data.mode === "letter") {
+        showSingleResult("Predicted Letter", data.letter.toUpperCase(), data.confidence);
+      } else if (data.mode === "sentence") {
+        showSentenceResult(data.text.toUpperCase(), data.count);
+      }
+    } catch (err) {
+      resultPlaceholder.style.display = "";
+      resultPlaceholder.textContent   = "⚠️  Error: " + err.message;
+      spinner.style.display           = "none";
+      resultSingle  .style.display    = "none";
+      resultSentence.style.display    = "none";
+    } finally {
+      document.getElementById("predictBtn").disabled = false;
+    }
+  });
+</script>
+
+</body>
+</html>
