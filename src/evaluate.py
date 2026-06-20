@@ -41,7 +41,8 @@ def evaluate_model():
         )
 
     print(f"[INFO] Loading model from: {model_path}")
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(model_path, compile=False)
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
     # ── 2. Load test data ────────────────────────────────────────────────────
     print("[INFO] Loading MNIST test data …")

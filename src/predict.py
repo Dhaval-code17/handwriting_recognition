@@ -10,6 +10,7 @@ import os
 import sys
 import numpy as np
 import cv2
+from PIL import Image
 
 # Allow running directly as `python src/predict.py` from the project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -303,7 +304,6 @@ def predict_letter_from_crop(img_array):
     """Run EMNIST letter inference on a character crop from sentence mode.
     
     The input is expected to be a grayscale binary crop (white character on black background).
-    This function avoids the rot90 and fliplr steps because sentence crops are already correctly oriented.
     """
     img = img_array.copy()
 
@@ -313,16 +313,16 @@ def predict_letter_from_crop(img_array):
         x, y, w, h = cv2.boundingRect(coords)
         img = img[y:y + h, x:x + w]
 
-    # Add padding: pad = max(w,h) // 3
-    pad = max(img.shape[0], img.shape[1]) // 3
+    # Add padding: pad = max(w,h) // 4
+    pad = max(img.shape[0], img.shape[1]) // 4
     img = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
 
     # Resize to 28x28
     img = cv2.resize(img, (28, 28), interpolation=cv2.INTER_AREA)
 
-    # Erode to thin strokes: kernel = np.ones((2,2)); cv2.erode iterations=1
-    kernel = np.ones((2, 2), np.uint8)
-    img = cv2.erode(img, kernel, iterations=1)
+    # EMNIST orientation fix (model was trained on transposed data)
+    img = np.rot90(img, k=3)
+    img = np.fliplr(img)
 
     # Normalize to 0-1
     img = img.astype("float32") / 255.0
@@ -341,6 +341,174 @@ def predict_letter_from_crop(img_array):
     print(f"  Confidence       : {confidence:.2f}%")
 
     return predicted_letter, confidence
+
+
+# -- Sentence prediction using Bounding Box Segmentation (Upgraded) ---------
+def should_merge(box1, box2):
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    
+    area1 = w1 * h1
+    area2 = w2 * h2
+    
+    smaller_area = min(area1, area2)
+    larger_area = max(area1, area2)
+    
+    if smaller_area < larger_area * 0.15:  # one is much smaller (dot-like)
+        x_overlap = min(x1+w1, x2+w2) - max(x1, x2)
+        min_width = min(w1, w2)
+        if x_overlap > min_width * 0.3:  # significant horizontal overlap
+            return True
+    
+    return False
+
+def predict_sentence_bbox(img_array):
+    """Run Bounding Box segmentation and batch predict each letter.
+    
+    Args:
+        img_array: Grayscale or RGBA numpy array from the canvas.
+    """
+    # 1. Preprocess: Get binary image (white text on black background)
+    if len(img_array.shape) == 3 and img_array.shape[2] == 4:
+        alpha = img_array[:, :, 3]
+        gray = 255 - alpha
+    elif len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_array.copy()
+        
+    _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+    
+    # 2. Find contours
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 3. Get bounding boxes, filter noise
+    boxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w * h > 100 and h > 10:
+            boxes.append((x, y, w, h))
+            
+    if not boxes:
+        return "", 0
+        
+    # 4. Sort left to right
+    boxes.sort(key=lambda b: b[0])
+    
+    # 4.5 Compute median height to detect dot-like boxes
+    heights = [h for x, y, w, h in boxes]
+    median_h = sorted(heights)[len(heights) // 2]
+    
+    # 5. Merge boxes that are vertically aligned diacritics (i-dot, j-dot, accents)
+    merged = []
+    for box in boxes:
+        if merged and should_merge(merged[-1], box):
+            px, py, pw, ph = merged[-1]
+            x, y, w, h = box
+            new_x = min(px, x)
+            new_y = min(py, y)
+            new_x2 = max(px + pw, x + w)
+            new_y2 = max(py + ph, y + h)
+            merged[-1] = (new_x, new_y, new_x2 - new_x, new_y2 - new_y)
+        else:
+            merged.append(box)
+            
+    # 5.5 Clean up implausibly narrow stray strokes
+    normal_widths = [w for (x, y, w, h) in merged if h >= median_h * 0.5]
+    if not normal_widths:
+        normal_widths = [w for (x, y, w, h) in merged]
+    base_w = sorted(normal_widths)[len(normal_widths) // 2]
+    
+    cleaned_boxes = []
+    for box in merged:
+        x, y, w, h = box
+        if h >= median_h * 0.5 and w < base_w * 0.25:
+            if cleaned_boxes:
+                px, py, pw, ph = cleaned_boxes[-1]
+                if x - (px + pw) < 10:  # Very close
+                    new_x = min(px, x)
+                    new_y = min(py, y)
+                    new_x2 = max(px + pw, x + w)
+                    new_y2 = max(py + ph, y + h)
+                    cleaned_boxes[-1] = (new_x, new_y, new_x2 - new_x, new_y2 - new_y)
+                    continue
+            cleaned_boxes.append(box)
+        else:
+            cleaned_boxes.append(box)
+            
+    final_boxes = cleaned_boxes
+    
+    # 6. Calculate median character width for space detection
+    widths = [w for x, y, w, h in final_boxes]
+    median_w = sorted(widths)[len(widths) // 2]
+    
+    # 7. Batch prediction
+    model = tf.keras.models.load_model(EMNIST_MODEL_PATH)
+    batch = []
+    valid_indices = []
+    
+    for i, (x, y, w, h) in enumerate(final_boxes):
+        char_img = binary[y:y+h, x:x+w]
+        if char_img.size == 0 or np.count_nonzero(char_img) < 5:
+            continue
+            
+        # 1. Stroke thickness normalization
+        c = normalize_stroke_thickness(char_img, target_ratio=0.06)
+            
+        # 2. Make square to preserve aspect ratio
+        h_crop, w_crop = c.shape
+        diff = abs(h_crop - w_crop)
+        
+        pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
+        if h_crop > w_crop:
+            pad_left = diff // 2
+            pad_right = diff - pad_left
+        else:
+            pad_top = diff // 2
+            pad_bottom = diff - pad_top
+            
+        c = cv2.copyMakeBorder(c, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
+        
+        # 3. Add 15% uniform padding so it doesn't touch the edges
+        pad = max(c.shape[0], c.shape[1]) * 15 // 100
+        c = cv2.copyMakeBorder(c, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+        
+        # 4. Resize and apply EMNIST orientation fix
+        c = cv2.resize(c, (28, 28), interpolation=cv2.INTER_AREA)
+        
+        c = np.rot90(c, k=3)
+        c = np.fliplr(c)
+        c = c.astype("float32") / 255.0
+        c = c.reshape(28, 28, 1)
+        
+        batch.append(c)
+        valid_indices.append(i)
+        
+    if not batch:
+        return "", 0
+        
+    batch_arr = np.array(batch)
+    preds = model.predict(batch_arr, verbose=0)
+    
+    final_text = ""
+    pred_idx = 0
+    for i in range(len(final_boxes)):
+        # Check for space
+        if i > 0:
+            prev_x, prev_y, prev_w, prev_h = final_boxes[i-1]
+            x, _, _, _ = final_boxes[i]
+            gap = x - (prev_x + prev_w)
+            if gap > median_w * 0.6:
+                final_text += " "
+                
+        if i in valid_indices:
+            predicted_idx = int(np.argmax(preds[pred_idx]))
+            letter = chr(predicted_idx + ord('a'))
+            final_text += letter
+            pred_idx += 1
+            
+    print(f"  Predicted Sentence : {final_text.upper()}")
+    return final_text.upper(), len(valid_indices)
 
 
 # -- Test routine -------------------------------------------------------------
